@@ -1,0 +1,7 @@
+{
+  "name": "MetaCheck",
+  "description": "Aplicativo para acompanhamento de metas",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
