@@ -56,91 +56,65 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (initializedRef.current) return;
     initializedRef.current = true;
 
-    // SAFETY TIMEOUT: If auth initialization takes longer than 10s, force loading to false.
-    // This prevents the app from being stuck on "CARREGANDO..." forever if Supabase is unreachable.
+    // SAFETY TIMEOUT: absolute last resort if everything else fails
     const safetyTimeout = setTimeout(() => {
       setLoading(prev => {
         if (prev) {
-          console.warn('Auth initialization timed out after 10s. Forcing loading=false.');
+          console.warn('Auth safety timeout reached. Forcing loading=false.');
           return false;
         }
         return prev;
       });
-    }, 10000);
+    }, 5000);
 
-    let didFinishInit = false;
+    // PRIMARY INIT: Use getSession() immediately to check for existing session.
+    // This is fast and reliable across all Supabase SDK versions.
+    const initAuth = async () => {
+      try {
+        const { data: { session: currentSession }, error } = await supabase.auth.getSession();
+        
+        if (error) {
+          console.error('Session check error:', error);
+          return;
+        }
 
-    // Use onAuthStateChange as the SINGLE source of truth (recommended by Supabase).
-    // This handles INITIAL_SESSION (newer SDK), SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED.
+        setSession(currentSession);
+        
+        if (currentSession?.user) {
+          await loadProfile(currentSession.user.id);
+        }
+      } catch (err) {
+        console.error('Auth init error:', err);
+      } finally {
+        // Always stop loading after the initial check, no matter what happened
+        clearTimeout(safetyTimeout);
+        setLoading(false);
+      }
+    };
+
+    initAuth();
+
+    // LISTENER: Handle subsequent auth events (login, logout, token refresh).
+    // This does NOT handle initial session — that's done by initAuth above.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, newSession) => {
         console.log('Auth event:', event);
 
-        // Update session state for all events
-        setSession(prev => {
-          if (prev === newSession) return prev;
-          return newSession;
-        });
+        // Skip INITIAL_SESSION since initAuth already handled it
+        if (event === 'INITIAL_SESSION') return;
 
-        if (
-          (event === 'INITIAL_SESSION' || event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') &&
-          newSession?.user
-        ) {
+        setSession(newSession);
+
+        if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && newSession?.user) {
           await loadProfile(newSession.user.id);
-          // After the first session event resolves, mark loading as done
-          if (!didFinishInit) {
-            didFinishInit = true;
-            clearTimeout(safetyTimeout);
-            setLoading(false);
-          }
-        } else if (event === 'INITIAL_SESSION' && !newSession) {
-          // No stored session exists — user is not logged in
-          if (!didFinishInit) {
-            didFinishInit = true;
-            clearTimeout(safetyTimeout);
-            setLoading(false);
-          }
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
-          if (!didFinishInit) {
-            didFinishInit = true;
-            clearTimeout(safetyTimeout);
-            setLoading(false);
-          }
         }
       }
     );
 
-    // FALLBACK: For older Supabase SDK versions that don't emit INITIAL_SESSION,
-    // manually check the session after a short delay.
-    const fallbackTimeout = setTimeout(async () => {
-      if (didFinishInit) return; // Already handled by onAuthStateChange
-      try {
-        const { data: { session: currentSession }, error } = await supabase.auth.getSession();
-        if (didFinishInit) return; // Race: onAuthStateChange fired while we were waiting
-
-        if (error) {
-          console.error('Session error (fallback):', error);
-        } else {
-          setSession(currentSession);
-          if (currentSession?.user) {
-            await loadProfile(currentSession.user.id);
-          }
-        }
-      } catch (err) {
-        console.error('Auth init fallback error:', err);
-      } finally {
-        if (!didFinishInit) {
-          didFinishInit = true;
-          clearTimeout(safetyTimeout);
-          setLoading(false);
-        }
-      }
-    }, 500);
-
     return () => {
       clearTimeout(safetyTimeout);
-      clearTimeout(fallbackTimeout);
       subscription.unsubscribe();
     };
   }, [loadProfile]);
