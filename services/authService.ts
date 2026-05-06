@@ -13,6 +13,7 @@ export interface AuthProfile {
   industries: string[];
   industryColors: Record<string, string>;
   workingDates: string[];
+  activePedIds: string[];
 }
 
 /**
@@ -47,6 +48,7 @@ export async function updateProfile(userId: string, updates: Partial<User>): Pro
   if (updates.industries !== undefined) dbUpdates.industries = updates.industries;
   if (updates.industryColors !== undefined) dbUpdates.industry_colors = updates.industryColors;
   if (updates.workingDates !== undefined) dbUpdates.working_dates = updates.workingDates;
+  if (updates.activePedIds !== undefined) dbUpdates.active_ped_ids = updates.activePedIds;
 
   const { data, error } = await supabase
     .from('profiles')
@@ -131,5 +133,6 @@ function mapProfileToUser(row: any): User {
     industries: row.industries || [],
     industryColors: row.industry_colors || {},
     workingDates: row.working_dates || [],
+    activePedIds: row.active_ped_ids || [],
   };
 }

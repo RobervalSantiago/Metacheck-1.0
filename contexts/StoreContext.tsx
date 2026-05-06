@@ -1,11 +1,14 @@
 
-import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo, useCallback, useRef } from 'react';
 import { AppState, User, Client, Goal, ActivationLog, UserRole, ClientUIState, View, SaleLog, PED, NegotiationLog, SellOutLog } from '../types';
 import { getInitialState, persistState } from '../services/dataService';
 import { getTrustedISOString, getTrustedDate, getPeriodKey, getCycleKey } from '../services/timeService';
 import { fetchClients, addClientToDb, updateClientInDb, deleteClientFromDb } from '../services/clientService';
 import { fetchPEDs, addPEDToDb, updatePEDInDb, deletePEDFromDb } from '../services/pedService';
 import { negotiationService } from '../services/negotiationService';
+import { fetchGoals, upsertGoal } from '../services/goalService';
+import { fetchActivationLogs, addActivationLogToDb } from '../services/activationLogService';
+import { fetchClientStates, upsertClientState, deleteAllClientStates } from '../services/clientStateService';
 import { useAuth } from './AuthContext';
 
 interface StoreContextType {
@@ -44,7 +47,7 @@ interface StoreContextType {
 const StoreContext = createContext<StoreContextType | undefined>(undefined);
 
 export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const { user: authUser } = useAuth();
+  const { user: authUser, updateProfile: authUpdateProfile } = useAuth();
   const [state, setState] = useState<AppState>(getInitialState());
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [isDarkMode, setIsDarkMode] = useState(false);
@@ -52,27 +55,37 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   const [isIOS, setIsIOS] = useState(false);
   const [isStandalone, setIsStandalone] = useState(false);
 
+  // Debounce ref for client state sync
+  const clientStateSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Sync currentUser from AuthContext
   useEffect(() => {
     setState(prev => {
       if (JSON.stringify(prev.currentUser) === JSON.stringify(authUser)) {
         return prev;
       }
-      return { ...prev, currentUser: authUser };
+      return { 
+        ...prev, 
+        currentUser: authUser,
+        activePedIds: authUser?.activePedIds || prev.activePedIds 
+      };
     });
   }, [authUser]);
 
-  // Load initial user data (clients, peds, logs) from Supabase when user is authenticated
+  // Load initial user data from Supabase when user is authenticated
   useEffect(() => {
     if (!authUser?.id) return;
     let cancelled = false;
 
     const loadUserData = async () => {
-      const [clients, peds, negLogs, sellOutLogs] = await Promise.all([
+      const [clients, peds, negLogs, sellOutLogs, goals, activationLogs, clientStatesDb] = await Promise.all([
         fetchClients(authUser.id),
         fetchPEDs(authUser.id),
         negotiationService.getNegotiationLogs(authUser.id),
-        negotiationService.getSellOutLogs(authUser.id)
+        negotiationService.getSellOutLogs(authUser.id),
+        fetchGoals(authUser.id),
+        fetchActivationLogs(authUser.id),
+        fetchClientStates(authUser.id),
       ]);
       
       if (!cancelled) {
@@ -81,7 +94,10 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           clients: clients.length > 0 ? clients : prev.clients,
           peds: peds.length > 0 ? peds : prev.peds,
           negotiationLogs: negLogs,
-          sellOutLogs: sellOutLogs
+          sellOutLogs: sellOutLogs,
+          goals: goals.length > 0 ? goals : prev.goals,
+          activationLogs: activationLogs.length > 0 ? activationLogs : prev.activationLogs,
+          clientStates: Object.keys(clientStatesDb).length > 0 ? clientStatesDb : prev.clientStates,
         }));
       }
     };
@@ -135,7 +151,12 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   const addActivationLog = (logData: Omit<ActivationLog, 'id'>) => {
     const timestamp = getTrustedISOString();
     const id = `l${Date.now()}`;
-    setState(prev => ({ ...prev, activationLogs: [...prev.activationLogs, { ...logData, id, timestamp }] }));
+    const fullLog: ActivationLog = { ...logData, id, timestamp };
+    setState(prev => ({ ...prev, activationLogs: [...prev.activationLogs, fullLog] }));
+    // Persist to Supabase
+    if (authUser?.id) {
+      addActivationLogToDb(authUser.id, fullLog);
+    }
   };
 
   const addClient = (c: Omit<Client, 'id'>) => {
@@ -171,6 +192,10 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         const filtered = prev.goals.filter(goal => !(goal.userId === g.userId && goal.month === g.month));
         return { ...prev, goals: [...filtered, g] };
     });
+    // Persist to Supabase
+    if (authUser?.id) {
+      upsertGoal(authUser.id, g);
+    }
   };
 
   const updateUser = (u: User) => setState(prev => ({ 
@@ -179,31 +204,47 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     currentUser: prev.currentUser?.id === u.id ? u : prev.currentUser 
   }));
 
-  const updateClientUIState = (id: string, up: Partial<ClientUIState>) => setState(prev => {
-    const key = `${prev.currentUser?.id}_${id}`;
-    const currentCycle = getCycleKey();
+  const updateClientUIState = (id: string, up: Partial<ClientUIState>) => {
+    setState(prev => {
+      const key = `${prev.currentUser?.id}_${id}`;
+      const currentCycle = getCycleKey();
+      let newState: AppState;
     
-    // If updating standard tasks, also sync to cycle history
-    if (up.tasks) {
-      const existing = prev.clientStates[key] || { clientId: id, isExpanded: false, isSaved: false, tasks: [], industryTasks: {} };
-      return { 
-        ...prev, 
-        clientStates: { 
-          ...prev.clientStates, 
-          [key]: { 
-            ...existing, 
-            ...up,
-            industryTasks: {
-              ...(existing.industryTasks || {}),
-              [currentCycle]: up.tasks
-            }
+      // If updating standard tasks, also sync to cycle history
+      if (up.tasks) {
+        const existing = prev.clientStates[key] || { clientId: id, isExpanded: false, isSaved: false, tasks: [], industryTasks: {} };
+        newState = { 
+          ...prev, 
+          clientStates: { 
+            ...prev.clientStates, 
+            [key]: { 
+              ...existing, 
+              ...up,
+              industryTasks: {
+                ...(existing.industryTasks || {}),
+                [currentCycle]: up.tasks
+              }
+            } 
           } 
-        } 
-      };
-    }
+        };
+      } else {
+        newState = { ...prev, clientStates: { ...prev.clientStates, [key]: { ...(prev.clientStates[key] || { clientId: id, isExpanded: false, isSaved: false, tasks: [] }), ...up } } };
+      }
 
-    return { ...prev, clientStates: { ...prev.clientStates, [key]: { ...(prev.clientStates[key] || { clientId: id, isExpanded: false, isSaved: false, tasks: [] }), ...up } } };
-  });
+      // Debounced sync to Supabase (avoids excessive writes during checklist toggling)
+      if (authUser?.id) {
+        if (clientStateSyncTimerRef.current) clearTimeout(clientStateSyncTimerRef.current);
+        clientStateSyncTimerRef.current = setTimeout(() => {
+          const stateData = newState.clientStates[key];
+          if (stateData) {
+            upsertClientState(authUser.id, id, stateData);
+          }
+        }, 2000);
+      }
+
+      return newState;
+    });
+  };
 
   const addPED = (name: string, items: string[], period: PED['period']) => {
     const newPED: PED = {
@@ -218,6 +259,8 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
 
     if (authUser?.id) {
       addPEDToDb(authUser.id, newPED);
+      // Sync active PED IDs to profile
+      syncActivePedIds([...state.activePedIds, newPED.id]);
     }
   };
 
@@ -233,11 +276,15 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   };
 
   const removePED = (id: string) => {
-    setState(prev => ({
-      ...prev,
-      peds: prev.peds.filter(p => p.id !== id),
-      activePedIds: prev.activePedIds.filter(pid => pid !== id)
-    }));
+    setState(prev => {
+      const newActivePedIds = prev.activePedIds.filter(pid => pid !== id);
+      syncActivePedIds(newActivePedIds);
+      return {
+        ...prev,
+        peds: prev.peds.filter(p => p.id !== id),
+        activePedIds: newActivePedIds
+      };
+    });
     deletePEDFromDb(id);
   };
 
@@ -245,8 +292,15 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     const next = prev.activePedIds.includes(id)
       ? prev.activePedIds.filter(pid => pid !== id)
       : [...prev.activePedIds, id];
+    syncActivePedIds(next);
     return { ...prev, activePedIds: next };
   });
+
+  // Helper: sync active PED IDs to Supabase profile
+  const syncActivePedIds = (ids: string[]) => {
+    if (!authUser?.id) return;
+    authUpdateProfile({ activePedIds: ids });
+  };
 
   const togglePEDTask = (clientId: string, pedId: string, label: string) => setState(prev => {
     const key = `${prev.currentUser?.id}_${clientId}`;
@@ -262,21 +316,31 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     const nextChecked = currentChecked.includes(label)
       ? currentChecked.filter(l => l !== label)
       : [...currentChecked, label];
+
+    const updatedClientState = {
+      ...clientState,
+      pedTasks: {
+        ...pedTasks,
+        [pedId]: {
+          ...pedEntry,
+          [periodKey]: nextChecked
+        }
+      }
+    };
+
+    // Debounced sync to Supabase
+    if (authUser?.id) {
+      if (clientStateSyncTimerRef.current) clearTimeout(clientStateSyncTimerRef.current);
+      clientStateSyncTimerRef.current = setTimeout(() => {
+        upsertClientState(authUser.id, clientId, updatedClientState);
+      }, 2000);
+    }
       
     return {
       ...prev,
       clientStates: {
         ...prev.clientStates,
-        [key]: {
-          ...clientState,
-          pedTasks: {
-            ...pedTasks,
-            [pedId]: {
-              ...pedEntry,
-              [periodKey]: nextChecked
-            }
-          }
-        }
+        [key]: updatedClientState
       }
     };
   });
@@ -340,6 +404,13 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
                 }
             }
         });
+
+        // Persist cycle-end activation logs to Supabase
+        if (userId) {
+          currentActivations.forEach(log => addActivationLogToDb(userId, log));
+          // Clear client states in Supabase
+          deleteAllClientStates(userId);
+        }
 
         return { 
             ...prev, 

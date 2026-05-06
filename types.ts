@@ -16,6 +16,7 @@ export interface User {
   industries?: string[];
   industryColors?: Record<string, string>;
   workingDates?: string[]; // Array of specific dates "YYYY-MM-DD" representing working days
+  activePedIds?: string[];
 }
 
 export interface Client {
