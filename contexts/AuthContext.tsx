@@ -28,16 +28,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const initializedRef = useRef(false);
-  const loadingProfileRef = useRef(false);
 
-  // Load profile from Supabase profiles table — guarded against concurrent calls and no-op updates
+  // Load profile from Supabase profiles table
   const loadProfile = useCallback(async (userId: string): Promise<User | null> => {
-    if (loadingProfileRef.current) return null;
-    loadingProfileRef.current = true;
     try {
       const profile = await fetchProfile(userId);
       setUser(prev => {
-        // Only update state if the profile actually changed (prevents re-render cascade)
         if (prev && profile && JSON.stringify(prev) === JSON.stringify(profile)) return prev;
         return profile;
       });
@@ -46,8 +42,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       console.error('Failed to load profile:', err);
       setUser(null);
       return null;
-    } finally {
-      loadingProfileRef.current = false;
     }
   }, []);
 
@@ -120,13 +114,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, [loadProfile]);
 
   const handleSignIn = async (email: string, password: string) => {
-    const { session: newSession } = await authSignIn(email, password);
-    // onAuthStateChange will handle setting session/user, but we also set it here
-    // for immediate feedback
-    setSession(newSession);
-    if (newSession?.user) {
-      await loadProfile(newSession.user.id);
-    }
+    // Only authenticate — onAuthStateChange SIGNED_IN will load the profile
+    await authSignIn(email, password);
   };
 
   const handleSignUp = async (
@@ -134,13 +123,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     password: string,
     metadata: { name: string; avatar: string; userCode?: string }
   ) => {
-    const { session: newSession } = await authSignUp(email, password, metadata);
-    setSession(newSession);
-    if (newSession?.user) {
-      // Small delay to allow the trigger to create the profile
-      await new Promise(resolve => setTimeout(resolve, 800));
-      await loadProfile(newSession.user.id);
-    }
+    // Only register — onAuthStateChange SIGNED_IN will load the profile
+    await authSignUp(email, password, metadata);
   };
 
   const handleSignOut = async () => {
