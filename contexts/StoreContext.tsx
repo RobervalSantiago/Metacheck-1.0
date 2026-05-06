@@ -1,6 +1,6 @@
 
 import React, { createContext, useContext, useState, useEffect, ReactNode, useMemo, useCallback } from 'react';
-import { AppState, User, Client, Goal, ActivationLog, UserRole, ClientUIState, View, SaleLog, PED } from '../types';
+import { AppState, User, Client, Goal, ActivationLog, UserRole, ClientUIState, View, SaleLog, PED, NegotiationLog, SellOutLog } from '../types';
 import { getInitialState, persistState } from '../services/dataService';
 import { getTrustedISOString, getTrustedDate, getPeriodKey, getCycleKey } from '../services/timeService';
 import { fetchClients, addClientToDb, updateClientInDb, deleteClientFromDb } from '../services/clientService';
@@ -54,7 +54,12 @@ export const StoreProvider: React.FC<{ children: ReactNode }> = ({ children }) =
 
   // Sync currentUser from AuthContext
   useEffect(() => {
-    setState(prev => ({ ...prev, currentUser: authUser }));
+    setState(prev => {
+      if (JSON.stringify(prev.currentUser) === JSON.stringify(authUser)) {
+        return prev;
+      }
+      return { ...prev, currentUser: authUser };
+    });
   }, [authUser]);
 
   // Load initial user data (clients, peds, logs) from Supabase when user is authenticated

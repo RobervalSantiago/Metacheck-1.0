@@ -57,6 +57,8 @@ export const getInitialState = (): AppState => {
     activePedIds: Array.isArray(parsed.activePedIds) 
       ? parsed.activePedIds 
       : (parsed.activePedId ? [parsed.activePedId] : (Array.isArray(parsed.pedTemplate) && parsed.pedTemplate.length > 0 ? ['legacy-ped'] : [])),
+    negotiationLogs: Array.isArray(parsed.negotiationLogs) ? parsed.negotiationLogs : [],
+    sellOutLogs: Array.isArray(parsed.sellOutLogs) ? parsed.sellOutLogs : [],
   };
 };
 

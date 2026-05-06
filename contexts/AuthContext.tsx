@@ -33,7 +33,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const loadProfile = useCallback(async (userId: string) => {
     try {
       const profile = await fetchProfile(userId);
-      setUser(profile);
+      setUser(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(profile)) return prev;
+        return profile;
+      });
       return profile;
     } catch (err) {
       console.error('Failed to load profile:', err);
