@@ -50,7 +50,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (initializedRef.current) return;
     initializedRef.current = true;
 
-    // SAFETY TIMEOUT: absolute last resort if everything else fails
+    // SAFETY TIMEOUT: absolute last resort
     const safetyTimeout = setTimeout(() => {
       setLoading(prev => {
         if (prev) {
@@ -61,8 +61,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       });
     }, 5000);
 
-    // PRIMARY INIT: Use getSession() immediately to check for existing session.
-    // This is fast and reliable across all Supabase SDK versions.
+    // PRIMARY INIT: check for existing session
     const initAuth = async () => {
       try {
         const { data: { session: currentSession }, error } = await supabase.auth.getSession();
@@ -80,7 +79,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       } catch (err) {
         console.error('Auth init error:', err);
       } finally {
-        // Always stop loading after the initial check, no matter what happened
         clearTimeout(safetyTimeout);
         setLoading(false);
       }
@@ -88,10 +86,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     initAuth();
 
-    // LISTENER: Handle subsequent auth events (login, logout, token refresh).
-    // This does NOT handle initial session — that's done by initAuth above.
+    // LISTENER: Handle subsequent auth events SYNCHRONOUSLY.
+    // CRITICAL: Do NOT use async/await here! The Supabase SDK internally waits
+    // for onAuthStateChange callbacks to complete before resolving signInWithPassword.
+    // If we await loadProfile here, signInWithPassword hangs → login spinner hangs forever.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, newSession) => {
+      (event, newSession) => {
         console.log('Auth event:', event);
 
         // Skip INITIAL_SESSION since initAuth already handled it
@@ -100,7 +100,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setSession(newSession);
 
         if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && newSession?.user) {
-          await loadProfile(newSession.user.id);
+          // Fire-and-forget: load profile in the background, do NOT block the callback
+          loadProfile(newSession.user.id);
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
         }
@@ -114,8 +115,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, [loadProfile]);
 
   const handleSignIn = async (email: string, password: string) => {
-    // Only authenticate — onAuthStateChange SIGNED_IN will load the profile
-    await authSignIn(email, password);
+    // 1. Authenticate with Supabase (this resolves once auth is done)
+    const { session: newSession } = await authSignIn(email, password);
+    // 2. Set session immediately for downstream consumers
+    setSession(newSession);
+    // 3. Load the user profile (this is what actually sets `user` and triggers the redirect)
+    if (newSession?.user) {
+      await loadProfile(newSession.user.id);
+    }
   };
 
   const handleSignUp = async (
@@ -123,8 +130,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     password: string,
     metadata: { name: string; avatar: string; userCode?: string }
   ) => {
-    // Only register — onAuthStateChange SIGNED_IN will load the profile
-    await authSignUp(email, password, metadata);
+    const { session: newSession } = await authSignUp(email, password, metadata);
+    setSession(newSession);
+    if (newSession?.user) {
+      // Small delay to allow the DB trigger to create the profile row
+      await new Promise(resolve => setTimeout(resolve, 800));
+      await loadProfile(newSession.user.id);
+    }
   };
 
   const handleSignOut = async () => {
